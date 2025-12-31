@@ -4,7 +4,7 @@ sidebar_position: 3
 
 # Dokploy Implementation
 
-Dokploy is our self-hosted Platform as a Service (PaaS). It runs in its own Proxmox container and allows us to deploy websites and applications via Docker without manually writing Traefik labels or managing complex Compose files.
+Dokploy is our self-hosted Platform as a Service (PaaS). It runs in its own Proxmox VM and allows us to deploy websites and applications via Docker without manually writing Traefik labels or managing complex Compose files.
 
 ## Requirements
 
