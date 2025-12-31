@@ -45,10 +45,6 @@ Dokploy handles Traefik routing automatically:
 - **Container Port:** Set this to the port your app listens on (e.g., `3000` for Next.js, `8080` for Spring).
 - Dokploy will automatically handle SSL certificates and external routing.
 
-### 7. Persistent Storage (If needed)
-If your app saves files (like images or a local SQLite DB), you **must** use the **Mounts** tab.
-- Docker containers are ephemeral; any file saved inside the container will be deleted on the next deployment unless a persistent volume is mounted.
-
 ## Troubleshooting
 
 - **Build Failure:** Check the **Logs** tab under **Deployments**. This is usually due to missing environment variables or a failing build command.
