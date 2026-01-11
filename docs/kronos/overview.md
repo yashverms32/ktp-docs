@@ -66,6 +66,7 @@ VE: Datacenter
 | 104 | KTP Docs  | LXC Container | Where this document lives!                                                        |
 | 105 | hp2025    | LXC Container | Stephen used this for his [Hackprinceton](https://www.hackprinceton.com/) project |
 | 106 | dokploy   | LXC Container | Deployment engine for internal + external apps (this site, etc.)                  |
+| 110 | Site      | LXC Container | Hosts ugaktp.com (KtpGeorgia.com's same repo)                                     |
 
 ## 🚀 Why Kronos Exists
 
