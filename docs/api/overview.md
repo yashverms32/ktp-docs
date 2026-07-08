@@ -15,7 +15,8 @@ The **KTP API** (`ktp-api`) is the backend for the KTP Georgia web platform. It'
 | Runtime | Node.js + Express |
 | Database | PostgreSQL (raw SQL via `pg`, no ORM) |
 | Auth | Authentik OIDC — JWT Bearer tokens (verified via JWKS) |
-| Photos | Immich (deferred — `POST /photos` returns 501) |
+| Photos & video | Immich — fully integrated |
+| Documents | ktp-api's own disk (`uploads/documents/`), not Immich — arbitrary file types |
 
 **Internal address:** `http://10.0.0.53:4000` (LXC 119)  
 **Public address:** `https://api2.ugaktp.com` (routed through Traefik on LXC 100)
@@ -82,18 +83,53 @@ PostgreSQL database: `ugaktp_db` on LXC 118 (`10.0.0.54:5432`)
 
 > **Why `username` is not UNIQUE:** Authentik reuses usernames after deletion, and the webhook-based cleanup isn't yet reliable. The `authentik_id` UUID is the true unique identifier.
 
-### `photos` table
+### Photos & albums
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `immich_asset_id` | `TEXT NOT NULL` | |
-| `title` | `TEXT` | Optional |
-| `caption` | `TEXT` | Optional |
-| `uploaded_by` | `UUID` | FK → `users(authentik_id)` ON DELETE SET NULL |
+Member-facing photos are always members-only — there is no public/private flag per row anymore. Public content lives entirely in a separate table (`homepage_photos`, below).
+
+| Table | Purpose |
+|-------|---------|
+| `albums` | Eboard-created named albums (e.g. "Spring Retreat 2026"). `created_by` → `users`. |
+| `photos` | `immich_asset_id`, `album_id` (nullable FK → `albums`; `NULL` = the general "Shared Album"), `title`, `caption`, `media_type` (`image`/`video`), `uploaded_by` → `users`. |
+
+Any member in `active`/`chair`/`alumni`/`eboard`/`pledge` (the full list lives in `constants.js` as `SHARED_ALBUM_GROUPS`, reused across every member-facing feature below) can upload/view. The uploader can always delete their own photo; an eboard member can additionally delete any photo inside an album *they personally created* (moderation, not blanket access to every album).
+
+### `homepage_photos` table
+
+The **public** chapter gallery shown on the actual homepage — a completely separate system from the member photos above, different audience and permission model. No auth on reads. Writes are eboard-only. Deleting a row only unlists it from the gallery — it deliberately does not delete the underlying Immich asset, since a registered asset might be reused elsewhere.
+
+| Column | Notes |
+|--------|-------|
+| `immich_asset_id`, `title`, `caption`, `media_type` | Same shape as `photos` |
+| `display_order` | Controls gallery ordering (eboard can reorder) |
+| `added_by` | FK → `users` |
+
+### Documents (`document_folders` / `documents`)
+
+An eboard-managed file library (bylaws, meeting minutes, course files, etc.) shown in the Files & Photos portal tab alongside photos. Deliberately **not** Immich — these are arbitrary file types, stored directly on ktp-api's own disk at `uploads/documents/` (bind-mounted in `docker-compose.yml` so uploads survive container rebuilds).
+
+| Table | Purpose |
+|-------|---------|
+| `document_folders` | `name`, `parent_id` (self-referencing FK — folders nest to any depth; `NULL` = top level), `created_by` |
+| `documents` | `folder_id` (nullable — `NULL` = top level), `filename` (original name shown to users), `storage_path` (actual disk path, never exposed to clients), `mime_type`, `file_size`, `uploaded_by` |
+
+View: any shared-album-group member. Writes (folders and files alike): eboard only. Deleting a folder cascades its DB rows *and* walks a recursive query to delete every nested file from disk too — disk space on the API's LXC is limited, so orphaned files aren't left behind.
+
+### Messaging (`announcements` / `direct_messages` / `group_chats` + friends)
+
+Three distinct systems, not one generic "messages" table:
+
+| Table | Purpose |
+|-------|---------|
+| `announcements` | Eboard-only, one-way broadcast. `audience` is nullable — `NULL` means everyone in `SHARED_ALBUM_GROUPS`, otherwise one specific group. Filtered server-side against the caller's Authentik groups. |
+| `direct_messages` | Any member ↔ any member. No separate "conversation" row — a thread is just every row where `(sender_id, recipient_id)` matches that pair in either direction. `read_at` tracks per-message read state. |
+| `group_chats` | Eboard-created, named, with an assigned member list (`group_chat_members`, a plain junction table) — unlike DMs and announcements, access here is gated by actual DB membership rows, not a broad Authentik group. Any group_chats members up in it can post; only eboard can create/delete a chat or manage its membership. |
+| `group_chat_messages` | Messages within a `group_chats` thread. |
+| `group_chat_reads` | Per-user "last read" marker per group chat — a single message can be read by many different members at different times, so (unlike `direct_messages`) read state can't live on the message row itself. |
 
 ### `events` table
 
-Standalone — no user FK. Full CRUD, no auth required.
+Standalone — no user FK. Full CRUD. `title`/`start_date`/`end_date` are validated server-side before touching the DB (a raw NOT NULL crash from a missing field was the original motivation).
 
 ---
 
@@ -106,6 +142,8 @@ DATABASE_URL=postgresql://root:<pass>@10.0.0.54:5432/ugaktp_db
 AUTHENTIK_ISSUER=https://auth.ugaktp.com/application/o/ktpapp/
 AUTHENTIK_JWKS_URL=http://10.0.0.4:9000/application/o/ktpapp/jwks/
 WEBHOOK_SECRET=<hex32>
+IMMICH_URL=http://10.0.0.3:2283
+IMMICH_API_KEY=<scoped to asset upload/read/delete only>
 PORT=4000
 NODE_ENV=production
 ```
@@ -119,15 +157,21 @@ NODE_ENV=production
 ```bash
 # On LXC 119
 cd /opt/ktp-api
-git pull
-docker compose up --build -d
+./refresh.sh
 ```
 
-To initialize the database schema (first run only):
+`refresh.sh` handles the whole deploy in one step: stops the container, pulls latest, rebuilds and restarts, then re-applies the schema (`node scripts/init-db.js --schema-only` — safe to re-run any time, every table uses `CREATE TABLE IF NOT EXISTS` so existing tables/data are untouched). It ends by printing a reminder that Postgres grants still need to be applied manually — that step has to happen on LXC 118, which the script (running on LXC 119) can't reach into.
 
-```bash
-docker exec ktp-api node scripts/init-db.js
+### Granting `root` access to any newly-created tables
+
+Whenever `db/schema.sql` gains new tables (which has happened a lot — albums, homepage_photos, documents, messages, announcements, group chats), this has bitten every single migration on this project, since whoever runs the script may be connected as a different Postgres role than `root` (what `DATABASE_URL` connects as):
+
+```sql
+GRANT ALL PRIVILEGES ON TABLE <new_table> TO root;
+GRANT ALL PRIVILEGES ON SEQUENCE <new_table>_id_seq TO root;  -- only for tables with a SERIAL id; skip for junction tables with composite PKs (e.g. group_chat_members)
 ```
+
+Skipping this step produces `permission denied for table <name>` (Postgres error 42501) the first time anyone hits the new feature.
 
 To access PostgreSQL directly (on LXC 118):
 
