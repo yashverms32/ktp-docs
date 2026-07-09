@@ -23,4 +23,4 @@ Pictures are stored in Immich and served through `/api/users/:id/profile-picture
 
 ## Admin: User Management
 
-`/admin/users` (eboard only) shows real member data — search, group filter, profile-complete filter, refresh button — pulled from the same admin-only `/admin/users` endpoint. There is currently **no way to remove/deactivate a user from this page** — member removal is a manual, Authentik-side + database operation (see [Member Management](../operations/member-management.md)), not something the website UI can do yet.
+`/admin/users` (eboard only) shows real member data — search, group filter, profile-complete filter, refresh button. Each member's group is an editable dropdown right on their row: picking a new value calls Authentik directly to move them there, then updates immediately (no waiting for their next login) — see [Operations: Changing a Member's Group](../operations/member-management.md#changing-a-members-group). There is still **no way to remove/deactivate a user from this page** — member removal remains an Authentik-side operation (see [Member Management](../operations/member-management.md)), not something the website UI does.

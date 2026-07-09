@@ -4,15 +4,15 @@ sidebar_position: 3
 
 # Messaging
 
-The **Messages** portal tab has three parts, each solving a genuinely different communication pattern. See [API: Announcements](../api/endpoints.md#announcements), [Messages](../api/endpoints.md#messages-direct-messages), and [Group Chats](../api/endpoints.md#group-chats) for the backend routes.
+The **Messages** portal tab covers Direct Messages and Group Chats — two genuinely different communication patterns. See [Messages](../api/endpoints.md#messages-direct-messages) and [Group Chats](../api/endpoints.md#group-chats) for the backend routes.
 
-All three use **short-interval polling** (roughly every 5-10 seconds while a relevant view is open) rather than real-time delivery (WebSockets) — this matches every other feature in the app (plain REST + refetch) and needed no new infrastructure. Genuinely instant delivery was considered and explicitly deferred; polling is imperceptibly slow for a chapter this size.
+Both use **short-interval polling** (roughly every 5-10 seconds while a relevant view is open) rather than real-time delivery (WebSockets) — this matches every other feature in the app (plain REST + refetch) and needed no new infrastructure. Genuinely instant delivery was considered and explicitly deferred; polling is imperceptibly slow for a chapter this size.
 
 ---
 
-## Announcements
+## Announcements (not in the Messages tab)
 
-One-way, eboard-only broadcasts — no replies. Eboard picks an audience per post: everyone, or one specific group (active/chair/alumni/eboard/pledge). Everyone else just reads them, filtered server-side to what their own group is allowed to see.
+One-way, eboard-only broadcasts — no replies. Eboard picks an audience per post (any combination of groups, or scope to one committee instead) at **`/admin/announcements`**, alongside event creation. Everyone else reads them from the **Dashboard**, filtered server-side to what they're allowed to see — this used to be a tab inside Messages, but moved out since it's a broadcast, not a conversation. See [API: Announcements](../api/endpoints.md#announcements).
 
 ---
 
@@ -26,10 +26,13 @@ Each conversation shows an unread badge and the last message preview. Opening a 
 
 ## Group Chats
 
-The one messaging mode that's **not** open to everyone by default: eboard creates a named group chat (e.g. "Rush Committee") and assigns specific members to it. Only assigned members can see or post in it — access is checked against an actual membership list in the database, not a broad Authentik group like everything else in the app.
+The one messaging mode that's **not** open to everyone by default: access is checked against an actual membership list in the database, not a broad Authentik group like everything else in the app. Three ways a chat comes to exist:
 
-- **Eboard only**: create a chat, delete a chat, add/remove members (editable any time after creation, not just at creation).
-- **Any assigned member**: post messages — this is a real multi-party thread, not a broadcast, so message bubbles show the sender's name (unlike DMs, where it's just "you" vs. "them").
+- **Eboard-created**: eboard names a chat (e.g. "Rush Committee") and assigns specific members — only eboard can create/delete a chat or add/remove members (editable any time after creation).
+- **Committee chats**: every [committee](./overview.md#committees) automatically gets its own linked group chat. Joining or leaving the committee joins/leaves its chat too — no separate step.
+- **The Eboard chat**: a singleton chat that every current eboard member is automatically in, reconciled on every login against the `eboard` Authentik group (self-healing — there's no explicit "join eboard" action to hook, unlike committees).
+
+**Any member of a given chat** can post — this is a real multi-party thread, not a broadcast, so message bubbles show the sender's name (unlike DMs, where it's just "you" vs. "them").
 
 ---
 

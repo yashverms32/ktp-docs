@@ -134,15 +134,13 @@ After a successful response, the website calls `update({ profile_complete: true 
 
 ## Events
 
-No auth required on any events route.
+Reads (`GET /events`, `GET /events/:id`) use `optionalAuth` — a valid token personalizes the results (targeted events included), but a missing/invalid token falls back to public-only results rather than rejecting (needed so the mobile app's calendar, which fetches anonymously, keeps working). Writes require `requireAuth` + membership in `SHARED_ALBUM_GROUPS`.
 
 ### `GET /events`
 
-Returns all events.
+Returns events visible to the caller: public ones (no `audience`/`committee_id` set) always; plus, if authenticated, ones where `audience` overlaps the caller's Authentik groups, or the caller is a member of the event's `committee_id`. Eboard gets every event unfiltered.
 
 ### `POST /events`
-
-Creates a new event.
 
 **Request body:**
 ```json
@@ -150,17 +148,61 @@ Creates a new event.
   "title": "General Meeting",
   "description": "Weekly chapter meeting",
   "date": "2026-02-01T18:00:00Z",
-  "location": "Boyd GSRC"
+  "location": "Boyd GSRC",
+  "audience": ["active", "chair"],
+  "committee_id": null,
+  "calendly_url": null
 }
 ```
 
+Permission depends on who's asking:
+- **Eboard**: can set any `audience` array and/or any `committee_id`.
+- **Committee chair**: can only set `committee_id` to a committee they chair — no `audience` (implicitly scoped to that committee's members).
+- **Anyone else**: 403.
+
+`title`/`date`(start/end)/`location` fields are validated before touching the DB.
+
 ### `PUT /events/:id`
 
-Updates an event by ID.
+Same permission logic as `POST /events`.
 
 ### `DELETE /events/:id`
 
-Deletes an event by ID.
+Eboard can delete any event; a non-eboard creator can delete their own.
+
+---
+
+## Committees
+
+DB-only membership (no Authentik group per committee) — same shape as Group Chats below. Every committee gets a linked group chat created alongside it, and joining/leaving a committee automatically joins/leaves that chat too.
+
+### `GET /committees`
+
+**Auth required.** All committees, with member count and whether the caller is a member/chair of each.
+
+### `POST /committees`
+
+**Eboard only.** `{ "name": "..." }`
+
+### `DELETE /committees/:id`
+
+**Eboard only.** Also deletes the linked group chat.
+
+### `POST /committees/:id/join`
+
+Self-service — adds the caller as `role: "member"` (no-op if already a member).
+
+### `DELETE /committees/:id/leave`
+
+Self-service — removes the caller (and from the linked group chat).
+
+### `GET /committees/:id/members`
+
+Any current member can view.
+
+### `PUT /committees/:id/members/:userId/role`
+
+**Eboard only.** `{ "role": "chair" | "member" }` — auto-adds the target user as a committee member first if they aren't already one.
 
 ---
 
@@ -266,15 +308,19 @@ Same file, but `Content-Disposition: inline` — used for the in-portal preview 
 
 ## Announcements
 
-Eboard-only broadcast — one-way, no replies. Any shared-album-group member can view (filtered by audience).
+Eboard-only broadcast — one-way, no replies. Any shared-album-group member can view (filtered by audience). Same targeting shape as Events: `audience` is an array, or scope to one `committee_id` instead.
 
 ### `GET /announcements`
 
-Returns announcements visible to the caller: `audience IS NULL` (everyone) or `audience` matches one of the caller's Authentik groups.
+Returns announcements visible to the caller: `audience` empty/null (everyone), `audience` overlaps the caller's Authentik groups, or the caller belongs to the announcement's `committee_id`. Eboard sees every announcement unfiltered.
 
 ### `POST /announcements`
 
-**Eboard only.** `{ "title": "...", "body": "...", "audience": "active" }` — omit/null `audience` to send to everyone.
+**Eboard only.** `{ "title": "...", "body": "...", "audience": ["active", "chair"], "committee_id": null }` — omit/empty `audience` (and no `committee_id`) to send to everyone.
+
+### `PUT /announcements/:id`
+
+**Eboard only.**
 
 ### `DELETE /announcements/:id`
 
@@ -348,11 +394,15 @@ Any current member can view the participant list.
 
 ## Admin
 
+All routes below require `requireAuth` + `requireGroup("eboard")`.
+
 ### `GET /admin/users`
 
-**Auth required — eboard only.** Returns all users in the database.
+Returns all users in the database.
 
-Middleware verifies that `req.user.groups` contains `"eboard"`. Returns 403 otherwise.
+### `PUT /admin/users/:authentikId/group`
+
+`{ "group": "eboard" | "chair" | "active" | "alumni" | "pledge" }` — moves the target user to this group in Authentik itself (removing them from whichever other role group they're currently in there), then mirrors the change into `users.member_group` immediately. See [API Overview: Eboard — changing a member's group](./overview.md#eboard-changing-a-members-group) for the full mechanism and required Authentik setup.
 
 ---
 
@@ -360,7 +410,7 @@ Middleware verifies that `req.user.groups` contains `"eboard"`. Returns 403 othe
 
 ### `POST /webhooks/authentik`
 
-Called by Authentik's notification transport when a user is deleted.
+Called by Authentik's notification transport when a user is deleted — **fixed and confirmed working in production.**
 
 **Headers:**
 ```
@@ -378,11 +428,11 @@ X-Authentik-Token: <WEBHOOK_SECRET>
 }
 ```
 
-> **Current status:** The `X-Authentik-Token` header is not being sent by Authentik's transport (known issue — investigated, not resolved). Workaround: manually delete rows from the `users` table when a user is removed from Authentik.
->
-> ```sql
-> DELETE FROM users WHERE username = 'jsmith';
-> ```
+Deleting a user in Authentik now correctly removes their row from `users` — no manual DB cleanup needed. The root causes of the long-standing "nothing happens" issue were entirely on the Authentik side, not this endpoint:
+1. The Notification Rule needs a Group **or** "Send notification to event user" set — Authentik silently no-ops a Rule with neither.
+2. The bound Event Matcher Policy's **App** field compares against the Event's own `event.app`, not `event.context.model.app` — leave App blank; Action=`Model Deleted` + Model=`User (authentik_core)` alone is correct and sufficient.
+
+If this breaks again, `docker logs worker` on the Authentik host (not this API's logs) shows structured `policy_execution` entries with a per-criterion pass/fail — the fastest way to see which criterion is silently failing.
 
 ---
 

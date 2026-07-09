@@ -76,6 +76,7 @@ PostgreSQL database: `ugaktp_db` on LXC 118 (`10.0.0.54:5432`)
 | `linkedin_url` | `TEXT` | |
 | `pledge_class` | `TEXT` | e.g. "Alpha", "Beta" |
 | `profile_picture_asset_id` | `TEXT` | Immich asset ID |
+| `calendly_url` | `TEXT` | Personal Calendly link (1-on-1 booking, e.g. coffee chats) — separate from the event-level `calendly_url` below, which is for group booking |
 | `member_group` | `TEXT` | One of: `active`, `pledge`, `eboard`, `chair`, `alumni` |
 | `profile_complete` | `BOOLEAN DEFAULT FALSE` | |
 | `created_at` | `TIMESTAMPTZ` | |
@@ -115,21 +116,50 @@ An eboard-managed file library (bylaws, meeting minutes, course files, etc.) sho
 
 View: any shared-album-group member. Writes (folders and files alike): eboard only. Deleting a folder cascades its DB rows *and* walks a recursive query to delete every nested file from disk too — disk space on the API's LXC is limited, so orphaned files aren't left behind.
 
-### Messaging (`announcements` / `direct_messages` / `group_chats` + friends)
+### `committees` / `committee_members` tables
 
-Three distinct systems, not one generic "messages" table:
+DB-only membership — no Authentik group per committee (unlike the coarse, stable groups that drive portal routing, committees are fine-grained and change often: self-join/leave, dynamic chair reassignment).
 
 | Table | Purpose |
 |-------|---------|
-| `announcements` | Eboard-only, one-way broadcast. `audience` is nullable — `NULL` means everyone in `SHARED_ALBUM_GROUPS`, otherwise one specific group. Filtered server-side against the caller's Authentik groups. |
+| `committees` | `name`, `created_by` → `users`, `group_chat_id` → `group_chats` (every committee gets its own linked group chat, created alongside it). |
+| `committee_members` | Composite PK (`committee_id`, `user_id`). `role` — `member` (self-service join/leave) or `chair` (eboard-only promote/demote). |
+
+Anyone can self-join/leave a committee as `member`; only eboard can promote/demote someone to `chair`. Joining or leaving a committee automatically adds/removes you from its linked group chat too — no separate action needed. A chair can create events scoped to their own committee (see `events` below), but can't set an `audience` — a chair's event is implicitly scoped to their committee's members.
+
+### Messaging (`announcements` / `direct_messages` / `group_chats` + friends)
+
+Four distinct systems, not one generic "messages" table:
+
+| Table | Purpose |
+|-------|---------|
+| `announcements` | Eboard-only, one-way broadcast. `audience` is a `TEXT[]` — `NULL`/empty means everyone in `SHARED_ALBUM_GROUPS`, otherwise any combination of groups (array-overlap match against the caller's groups). Can alternatively be scoped to one `committee_id` instead of `audience`. Eboard sees every announcement regardless of targeting (they're the ones doing the targeting and need to manage all of it); everyone else only sees what applies to them. |
 | `direct_messages` | Any member ↔ any member. No separate "conversation" row — a thread is just every row where `(sender_id, recipient_id)` matches that pair in either direction. `read_at` tracks per-message read state. |
-| `group_chats` | Eboard-created, named, with an assigned member list (`group_chat_members`, a plain junction table) — unlike DMs and announcements, access here is gated by actual DB membership rows, not a broad Authentik group. Any group_chats members up in it can post; only eboard can create/delete a chat or manage its membership. |
+| `group_chats` | Named, with an assigned member list (`group_chat_members`, a plain junction table) — access is gated by actual DB membership rows, not a broad Authentik group. Three ways a chat gets created: eboard makes one directly (and can add/remove members any time), a committee gets one automatically (membership mirrors the committee), or the singleton **eboard chat** (`is_eboard_chat` flag) is lazily created on first eboard login and reconciled against the `eboard` Authentik group on every login — no "join eboard" action to hook, so it self-heals on login instead. |
 | `group_chat_messages` | Messages within a `group_chats` thread. |
 | `group_chat_reads` | Per-user "last read" marker per group chat — a single message can be read by many different members at different times, so (unlike `direct_messages`) read state can't live on the message row itself. |
 
 ### `events` table
 
-Standalone — no user FK. Full CRUD. `title`/`start_date`/`end_date` are validated server-side before touching the DB (a raw NOT NULL crash from a missing field was the original motivation).
+Gained several columns beyond the original bare title/date/location shape:
+
+| Column | Notes |
+|--------|-------|
+| `location` | Plain text |
+| `audience` | `TEXT[]`, same shape/semantics as `announcements.audience` above — `NULL`/empty = public |
+| `committee_id` | Scopes the event to one committee's members instead of (not combined with) `audience` |
+| `calendly_url` | Optional group booking/RSVP link — distinct from a user's personal `calendly_url` on their profile |
+| `created_by` | → `users`. Needed because non-eboard users (committee chairs) can create events too, to check *which* committee they're allowed to scope one to |
+
+**Permission logic** (`eventsController.checkEventPermission`): eboard can set any `audience`/`committee_id` combination; a committee chair can only scope to a committee they chair, and can't set `audience`; anyone else is forbidden. `title`/`start_date`/`end_date` are validated server-side before touching the DB.
+
+---
+
+## Eboard: changing a member's group
+
+`PUT /admin/users/:authentikId/group` (eboard only) lets eboard move a member between groups directly from the website's `/admin/users` page, instead of going into Authentik's own UI. Unlike the webhook above (which reacts to Authentik-side changes after the fact — and got stuck on group-change events not reliably carrying the affected user's pk), this endpoint **drives** Authentik: it already knows the exact user and target group from the request, so it calls Authentik's own REST API (`services/authentikAdmin.js`) to move the user between groups there first, then mirrors the result into `users.member_group` immediately — no waiting for the member's next login. Authentik stays the source of truth throughout.
+
+Requires a dedicated Authentik service account (`ktp-api-service`) with a Role granting object-level `add_user_to_group`/`remove_user_from_group`/`view_group` permissions on each of the five role groups individually, plus a global `view_user` permission — see [Authentik: API Tokens / Service Accounts](../authentik/overview.md#api-tokens--service-accounts) for the full setup.
 
 ---
 
@@ -142,13 +172,15 @@ DATABASE_URL=postgresql://root:<pass>@10.0.0.54:5432/ugaktp_db
 AUTHENTIK_ISSUER=https://auth.ugaktp.com/application/o/ktpapp/
 AUTHENTIK_JWKS_URL=http://10.0.0.4:9000/application/o/ktpapp/jwks/
 WEBHOOK_SECRET=<hex32>
+AUTHENTIK_API_TOKEN=<service account token, see Authentik docs>
+AUTHENTIK_API_URL=https://auth.ugaktp.com
 IMMICH_URL=http://10.0.0.3:2283
 IMMICH_API_KEY=<scoped to asset upload/read/delete only>
 PORT=4000
 NODE_ENV=production
 ```
 
-> **Hairpin NAT:** The Docker container can't reach Authentik via the public domain. Use the internal IP (`http://10.0.0.4:9000`) for `AUTHENTIK_JWKS_URL`.
+> **Hairpin NAT:** The Docker container can't reach Authentik via the public domain. Use the internal IP (`http://10.0.0.4:9000`) for `AUTHENTIK_JWKS_URL`, and the same internal IP for `AUTHENTIK_API_URL` if the public hostname turns out to be unreachable from inside the LAN too.
 
 ---
 
@@ -160,11 +192,13 @@ cd /opt/ktp-api
 ./refresh.sh
 ```
 
-`refresh.sh` handles the whole deploy in one step: stops the container, pulls latest, rebuilds and restarts, then re-applies the schema (`node scripts/init-db.js --schema-only` — safe to re-run any time, every table uses `CREATE TABLE IF NOT EXISTS` so existing tables/data are untouched). It ends by printing a reminder that Postgres grants still need to be applied manually — that step has to happen on LXC 118, which the script (running on LXC 119) can't reach into.
+`refresh.sh` handles the whole deploy in one step: stops the container, pulls latest, rebuilds and restarts, then runs pending schema migrations (`npm run migrate:up`, via [node-pg-migrate](https://github.com/salsita/node-pg-migrate) — safe to re-run any time, tracked in a `pgmigrations` table). It ends by printing a reminder that Postgres grants still need to be applied manually — that step has to happen on LXC 118, which the script (running on LXC 119) can't reach into.
+
+**Adding a new schema change:** `npm run migrate:create -- <name>`, write idempotent SQL in the generated file's `-- Up Migration` section, then `npm run migrate:up`. There's no rollback path (`-- Down Migration` stays empty) — hasn't been needed.
 
 ### Granting `root` access to any newly-created tables
 
-Whenever `db/schema.sql` gains new tables (which has happened a lot — albums, homepage_photos, documents, messages, announcements, group chats), this has bitten every single migration on this project, since whoever runs the script may be connected as a different Postgres role than `root` (what `DATABASE_URL` connects as):
+Whenever a migration adds new tables (which has happened a lot — albums, homepage_photos, documents, messages, announcements, group chats, committees), this has bitten almost every migration on this project, since whoever runs it may be connected as a different Postgres role than `root` (what `DATABASE_URL` connects as):
 
 ```sql
 GRANT ALL PRIVILEGES ON TABLE <new_table> TO root;

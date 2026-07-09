@@ -29,14 +29,27 @@ Three of the four portals (`/member`, `/admin`, `/alumni`) share a common `Porta
 
 All four portals get the same core feature set, wired to the same backend (only permissions differ by group):
 
-- **Dashboard** — upcoming events, recent photos, quick links
-- **Calendar** — chapter events
+- **Dashboard** — upcoming events, recent announcements, recent photos, quick links
+- **Calendar** — chapter events, including committee meetings, targeted to whoever's allowed to see them
+- **Committees** — browse committees and member counts; join/leave any committee yourself; eboard creates committees and promotes/demotes chairs; a chair can schedule a meeting scoped to their own committee (shows on the calendar, optionally with a Calendly link for RSVP/sign-up)
 - **Files & Photos** — shared photo albums + the eboard-managed document library ([Photos & Documents](./photos-and-documents.md))
-- **Messages** — announcements, direct messages, and group chats ([Messaging](./messaging.md))
-- **Directory** — browse members, view a profile, start a conversation (`/member` and `/alumni` only — [Profiles & Directory](./profiles-and-directory.md))
-- **Settings** — edit your own profile, including profile picture
+- **Messages** — direct messages and group chats, including auto-managed committee chats and the eboard chat ([Messaging](./messaging.md))
+- **Directory** — browse members, view a profile, start a conversation, optionally book time via their personal Calendly link (`/member` and `/alumni` only — [Profiles & Directory](./profiles-and-directory.md))
+- **Settings** — edit your own profile (including profile picture and personal Calendly link)
 
-`/admin` additionally gets **User Management** (`/admin/users`, wired to real member data) and **Homepage Photo management** (curating the public chapter gallery shown on the actual homepage).
+`/admin` additionally gets **User Management** (`/admin/users` — real member data, plus eboard can change a member's group directly from here) and **Homepage Photo management** (curating the public chapter gallery shown on the actual homepage). Announcement/event creation, including audience targeting, lives at `/admin/announcements`.
+
+---
+
+## Committees
+
+DB-only membership, not a new Authentik group per committee — see [API: Committees](../api/overview.md#committees--committee_members-tables) for why. One shared page (not a new portal), added to all four portals:
+
+- **Anyone**: browse committees and member counts, join or leave any committee themselves.
+- **Eboard**: create/delete committees, promote or demote a member to **chair**.
+- **A committee's chair**: schedule a meeting scoped to their own committee — shows on everyone's calendar who's in that committee, with an optional Calendly link for RSVP or slot booking.
+
+Every committee automatically gets its own linked Group Chat (see [Messaging](./messaging.md#group-chats)) — joining/leaving the committee joins/leaves the chat too.
 
 ---
 
