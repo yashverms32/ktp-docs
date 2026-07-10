@@ -192,22 +192,15 @@ cd /opt/ktp-api
 ./refresh.sh
 ```
 
-`refresh.sh` handles the whole deploy in one step: stops the container, pulls latest, rebuilds and restarts, then runs pending schema migrations (`npm run migrate:up`, via [node-pg-migrate](https://github.com/salsita/node-pg-migrate) — safe to re-run any time, tracked in a `pgmigrations` table). It ends by printing a reminder that Postgres grants still need to be applied manually — that step has to happen on LXC 118, which the script (running on LXC 119) can't reach into.
+`refresh.sh` handles the whole deploy in one step: stops the container, pulls latest, rebuilds and restarts, then runs pending schema migrations (`npm run migrate:up`, via [node-pg-migrate](https://github.com/salsita/node-pg-migrate) — safe to re-run any time, tracked in a `pgmigrations` table). Earlier versions of this doc had the script ending with a reminder to apply Postgres grants manually — that's no longer necessary (see below), so ignore that reminder if an older `refresh.sh` still prints it.
 
 **Adding a new schema change:** `npm run migrate:create -- <name>`, write idempotent SQL in the generated file's `-- Up Migration` section, then `npm run migrate:up`. There's no rollback path (`-- Down Migration` stays empty) — hasn't been needed.
 
-### Granting `root` access to any newly-created tables
+### Postgres grants — no longer needed (fixed 2026-07-10)
 
-Whenever a migration adds new tables (which has happened a lot — albums, homepage_photos, documents, messages, announcements, group chats, committees), this has bitten almost every migration on this project, since whoever runs it may be connected as a different Postgres role than `root` (what `DATABASE_URL` connects as):
+New tables used to need a manual `GRANT ALL PRIVILEGES ON TABLE <table> TO root;` (plus the sequence, for `SERIAL` ids) after almost every migration, since whoever ran it might be connected as a different Postgres role than `root` (what `DATABASE_URL` connects as) — skipping it produced `permission denied for table <name>` (error 42501) the first time anyone hit the new feature. `root` now has permissions on new tables regardless of which role creates them, so this manual step is gone. If a 42501 ever shows up again, treat it as a new problem worth investigating, not this old known issue.
 
-```sql
-GRANT ALL PRIVILEGES ON TABLE <new_table> TO root;
-GRANT ALL PRIVILEGES ON SEQUENCE <new_table>_id_seq TO root;  -- only for tables with a SERIAL id; skip for junction tables with composite PKs (e.g. group_chat_members)
-```
-
-Skipping this step produces `permission denied for table <name>` (Postgres error 42501) the first time anyone hits the new feature.
-
-To access PostgreSQL directly (on LXC 118):
+To access PostgreSQL directly (on LXC 118), if ever needed for something else:
 
 ```bash
 su - postgres
