@@ -13,7 +13,9 @@ The **Files & Photos** portal tab has two parts: a member-facing photo/album sys
 Two ways photos are organized:
 
 - **Shared Album** — a single general album open to everyone (active, chair, alumni, eboard, pledge). Anyone can upload; the uploader can delete their own photo.
-- **Eboard-created named albums** — e.g. "Spring Retreat 2026." Only eboard can create a new album; anyone in the shared-album groups can browse into one and upload. An eboard member can additionally delete any photo inside an album **they personally created** (moderation — not blanket access to every album someone else made).
+- **Eboard-created named albums** — e.g. "Spring Retreat 2026." Only eboard can create a new album; anyone in the shared-album groups can browse into one and upload.
+
+**Deleting photos:** the uploader can always delete their own. **Eboard can delete any photo in any album, including the Shared Album** — a real moderation power, not scoped to albums a given eboard member personally created (that narrower rule was the original behavior; broadened so eboard can act on a reported photo regardless of which album it's in — see [Safety & Moderation](./overview.md#safety--moderation)). Every photo card also has a **Report** button for flagging it to eboard's review queue without deleting it yourself.
 
 Both images and video are supported (250MB upload limit). Photos and videos are served through `PhotoMedia`, a small shared component that picks `<img>` vs `<video controls>` by the photo's `media_type` — reused everywhere a photo/video renders (album grids, the dashboard's "Recent Photos" preview).
 
@@ -25,10 +27,11 @@ Photos are stored in Immich, but never exposed directly to the browser — ktp-a
 
 A nested folder/file library for things like bylaws, meeting minutes, and course files — a completely different storage system from photos, since these are arbitrary file types (PDFs, Word docs, etc.), not something Immich handles well. Files live directly on ktp-api's own disk.
 
-- **Eboard only**: create folders (nested to any depth), upload files, delete files/folders.
+- **Eboard only**: create folders (nested to any depth), upload files, add external links, delete files/folders/links.
 - **Any shared-album-group member**: browse, download, preview.
 - **In-portal preview**: clicking a document opens a modal without leaving the page — images render inline, PDFs render in an embedded viewer, and anything else (Word, Excel) shows a "download instead" message rather than a broken preview attempt. Implemented as a small hand-rolled modal, not a UI-library dialog — matches how `Tabs` is already hand-rolled in this codebase.
 - The document icon in the file list shows an actual thumbnail for images; everything else gets a generic file icon.
+- **External links**: a document doesn't have to be a real file — eboard can add a link (a Google Doc, Slides deck, Sheet, or any URL) that shows up in the same folder tree with a distinct external-link icon. Clicking one opens the URL directly in a new tab instead of going through the download/preview flow. Useful for anything that already lives outside the chapter's own storage (shared Google Docs, external forms, etc.) without needing to export/re-upload it.
 
 ---
 

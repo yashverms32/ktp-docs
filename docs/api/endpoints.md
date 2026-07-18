@@ -101,6 +101,26 @@ After a successful response, the website calls `update({ profile_complete: true 
 
 ---
 
+### `DELETE /users/me`
+
+**Auth required.** Self-service account deletion. **Anonymizes, does not hard-delete** — clears every PII field (name, email, phone, major, etc.), sets `profile_complete = false`, and stamps `deleted_at`, but leaves the row (and their messages/photos/committee history) in place so other members' conversations and albums aren't broken. Excluded from `/members` and `/admin/users` afterward. Best-effort deletes their Immich profile-picture asset first.
+
+Never touches Authentik — revoking real chapter/SSO access is a separate, eboard-owned action (deleting them in Authentik directly, which the webhook below still hard-deletes for). The website signs the user out immediately after this succeeds; any client calling this should do the same.
+
+### `GET /users/blocked`
+
+**Auth required.** The caller's own block list — people they've blocked, not people who've blocked them.
+
+### `POST /users/:id/block`
+
+**Auth required.** Blocks a member. Prevents new direct messages starting in either direction and hides the blocked user's messages from the caller's own DM and group chat views. One-directional and idempotent.
+
+### `DELETE /users/:id/block`
+
+**Auth required.** Unblocks.
+
+---
+
 ## Members
 
 ### `GET /members`
@@ -206,6 +226,48 @@ Any current member can view.
 
 ---
 
+## Polls
+
+Targeted the same way as Events/Announcements (`audience` array or `committee_id`, mutually exclusive). Voting is self-service; only eboard sees who voted for what — not anonymous to eboard.
+
+### `GET /polls`
+
+Visible polls for the caller (or all, if eboard), each with its options, aggregate vote counts per option, the caller's own selection (`my_option_ids`), and `total_votes`. `is_closed` reflects either a manual close or `expires_at` having passed — computed fresh on every read, not a stored flag, so it's always accurate even if nothing ever flips it in the DB.
+
+### `POST /polls`
+
+**Eboard only.**
+```json
+{
+  "question": "Best meeting time?",
+  "description": "...",
+  "options": ["Monday 6pm", "Wednesday 7pm"],
+  "multi_select": false,
+  "audience": ["active", "chair"],
+  "committee_id": null,
+  "expires_at": "2026-08-01T23:00:00Z"
+}
+```
+`options` needs at least 2. `expires_at` is optional — voting closes automatically at that time with no cron job involved (see `GET /polls` above). Omit for a poll that only closes when eboard manually closes it.
+
+### `DELETE /polls/:id`
+
+**Eboard only.**
+
+### `PUT /polls/:id/close`
+
+**Eboard only.** One-way manual close, independent of `expires_at`.
+
+### `POST /polls/:id/vote`
+
+Any shared-album-group member. `{ "option_ids": [3] }` — a single id unless `multi_select`. Replaces the caller's entire prior selection for this poll, so calling it again is also how you change your vote while it's still open.
+
+### `GET /polls/:id/stats`
+
+**Eboard only.** Same per-option counts as the list view, but with a `voters` array (name + id) per option.
+
+---
+
 ## Photos & Albums
 
 Members-only — the general shared album and eboard-created named albums alike. Public photos live in the separate **Homepage Photos** section below, not here. All routes require auth + membership in one of `active`/`chair`/`alumni`/`eboard`/`pledge`.
@@ -224,7 +286,7 @@ Streams the photo/video from Immich (forwards `Range` headers for video seeking)
 
 ### `DELETE /photos/:id`
 
-The uploader can always delete their own photo. An eboard member can additionally delete any photo inside an album **they personally created** (moderation — not blanket access to every album).
+The uploader can always delete their own photo. **Eboard can delete any photo, in any album** — including the general Shared Album — as a real moderation power. (Previously scoped to only albums an eboard member personally created; broadened so eboard can act on any reported photo, not just their own albums.)
 
 ---
 
@@ -300,9 +362,13 @@ Streams the file with `Content-Disposition: attachment` and the original filenam
 
 Same file, but `Content-Disposition: inline` — used for the in-portal preview (images render inline, PDFs in an `<iframe>`) instead of forcing a download.
 
+### `POST /documents/link`
+
+**Eboard only.** An external hyperlink (Google Docs/Slides/Sheets, or any URL) shown alongside real files in the same folder tree — no file on disk. `{ "folder_id": null, "filename": "Meeting Notes", "url": "https://docs.google.com/..." }`. Every document row now carries `kind: "file" | "link"` — link rows have `url` set and no `mime_type`/`file_size`/`storage_path`.
+
 ### `DELETE /documents/:id`
 
-**Eboard only.** Removes the DB row and unlinks the file from disk.
+**Eboard only.** Removes the DB row and, for `kind: "file"` rows, unlinks the file from disk (link rows have nothing on disk to clean up).
 
 ---
 
@@ -332,6 +398,8 @@ Returns announcements visible to the caller: `audience` empty/null (everyone), `
 
 Any member can message any other member — no membership list, unlike Group Chats below.
 
+**Safety features, both here and in Group Chats:** message bodies are checked against a basic content filter (`services/contentFilter.js`, wraps the `bad-words` package — **pinned to v3**, v4 ships broken CJS packaging that can't be `require()`'d from this project) and rejected with `400` if flagged. Sending is rate-limited to 20 messages/minute/user (`middleware/rateLimit.js`, in-memory, no Redis) — a `429` means slow down, not a real error. Blocking (see Users above) also applies: `POST /messages` 403s if either party has blocked the other, and a blocked user's messages are filtered out of `GET /messages/conversations` and `GET /messages/conversations/:userId` for whoever did the blocking.
+
 ### `GET /messages/conversations`
 
 Returns one entry per person the caller has exchanged messages with: their basic info, the last message, and an unread count — sorted by most recent activity.
@@ -352,7 +420,7 @@ Marks every message from `:userId` to the caller as read.
 
 ## Group Chats
 
-Eboard-created, named, with an assigned member list — access is gated by actual DB membership (`group_chat_members`), not a broad Authentik group, so most routes below check membership inline and return **403** if the caller isn't in that specific chat.
+Eboard-created, named, with an assigned member list — access is gated by actual DB membership (`group_chat_members`), not a broad Authentik group, so most routes below check membership inline and return **403** if the caller isn't in that specific chat. Same content filter + rate limit as Direct Messages above. Blocking doesn't stop someone from posting in a shared group chat (they're a legitimate member) — it filters their messages out of `GET /group-chats/:id/messages` for whoever blocked them, same idea as the DM thread filtering.
 
 ### `GET /group-chats`
 
@@ -389,6 +457,24 @@ Any current member can view the participant list.
 ### `DELETE /group-chats/:id/members/:userId`
 
 **Eboard only.**
+
+---
+
+## Reports & Moderation
+
+App Store safety requirement (reporting/blocking/moderation for an app with user-generated content). Submitting a report is self-service; reviewing the queue is eboard-only — there's no separate "moderator" Authentik group, this reuses eboard the same way every other admin-gated feature does.
+
+### `POST /reports`
+
+Any shared-album-group member. `{ "content_type": "user" | "message" | "group_message" | "photo", "content_id": "...", "reported_user_id": "uuid", "reason": "...", "explanation": "..." }`. `content_id` is required unless `content_type` is `"user"`. `reported_user_id` is trusted from the client (the UI reporting a message/photo/profile already knows who authored it) rather than re-derived server-side — content spans three different tables, not worth a per-type lookup just to double-check what the caller already knows.
+
+### `GET /reports`
+
+**Eboard only.** Optional `?status=open|resolved|dismissed`. Returns reporter/reported-user names already joined in.
+
+### `PUT /reports/:id/status`
+
+**Eboard only.** `{ "status": "resolved" | "dismissed" | "open", "moderator_response": "..." }` — stamps `resolved_by`/`resolved_at` whenever status moves away from `open`.
 
 ---
 

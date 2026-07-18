@@ -14,10 +14,15 @@ Pictures are stored in Immich and served through `/api/users/:id/profile-picture
 
 ## Member Directory
 
-`/member/directory` and `/alumni/directory` list chapter members (name, major, pledge class, graduation, group badge). Clicking any member opens a **profile view** — a modal with their photo, group, major, pledge class, graduation date, and email, plus two actions:
+`/member/directory` and `/alumni/directory` list chapter members (name, major, pledge class, graduation, group badge). Clicking any member opens a **profile view** — a modal with their photo, group, major, pledge class, graduation date, and email, plus:
 
 - **Email** — a `mailto:` link, if they have an email on file
 - **Message** — jumps straight into a direct-message conversation with them, in whichever portal you're currently in (`/member/messages?with=<id>`, `/alumni/messages?with=<id>`, etc. — the target portal is derived from the current URL, not hardcoded, so this works the same from any portal that has a Directory)
+- **Schedule** — link-out to their personal Calendly, if they've set one in Settings
+- **Report** — flags the profile itself to eboard's review queue (see [Safety & Moderation](./overview.md#safety--moderation))
+- **Block** — stops them from messaging you and hides their messages from your own view, self-service, no eboard approval needed
+
+The last two aren't shown on your own profile.
 
 ---
 

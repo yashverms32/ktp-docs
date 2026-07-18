@@ -79,8 +79,26 @@ PostgreSQL database: `ugaktp_db` on LXC 118 (`10.0.0.54:5432`)
 | `calendly_url` | `TEXT` | Personal Calendly link (1-on-1 booking, e.g. coffee chats) — separate from the event-level `calendly_url` below, which is for group booking |
 | `member_group` | `TEXT` | One of: `active`, `pledge`, `eboard`, `chair`, `alumni` |
 | `profile_complete` | `BOOLEAN DEFAULT FALSE` | |
+| `deleted_at` | `TIMESTAMPTZ` | Set by self-service `DELETE /users/me` (anonymize, not hard-delete — see below). `NULL` for every active member |
 | `created_at` | `TIMESTAMPTZ` | |
 | `updated_at` | `TIMESTAMPTZ` | Auto-updated by trigger |
+
+**Self-service account deletion (`DELETE /users/me`) anonymizes in place** rather than removing the row: every PII field gets nulled out, `member_group` is cleared, `profile_complete` resets to `false`, and `deleted_at` is stamped. Their messages, photos, and committee history stay attached to the (now-anonymized) row so other members' conversations and albums aren't broken by a deleted user disappearing mid-thread. This is deliberately distinct from the Authentik deletion webhook above — that one still hard-deletes the row when eboard removes someone from Authentik entirely. Self-service deletion never touches Authentik itself; that stays an eboard-owned action.
+
+### `user_blocks` table
+
+One-directional: `blocker_id` has blocked `blocked_id`. Composite PK, both columns FK → `users`. Checked both directions when starting a new DM (either party having blocked the other is enough to stop it) but only the blocker's own direction is used to filter what they see in their own message/conversation views.
+
+### `reports` table
+
+| Column | Notes |
+|--------|-------|
+| `reporter_id`, `reported_user_id` | FK → `users` |
+| `content_type` | `user` \| `message` \| `group_message` \| `photo` |
+| `content_id` | Loose `TEXT` reference, not a real FK — spans three different tables depending on `content_type`, so one FK column can't cover all of them. Integrity enforced in the application layer. `NULL` when `content_type = "user"` |
+| `reason`, `explanation` | |
+| `status` | `open` \| `resolved` \| `dismissed` |
+| `moderator_response`, `resolved_by`, `resolved_at` | Set together whenever status moves away from `open` |
 
 > **Why `username` is not UNIQUE:** Authentik reuses usernames after deletion, and the webhook-based cleanup isn't yet reliable. The `authentik_id` UUID is the true unique identifier.
 
@@ -93,7 +111,7 @@ Member-facing photos are always members-only — there is no public/private flag
 | `albums` | Eboard-created named albums (e.g. "Spring Retreat 2026"). `created_by` → `users`. |
 | `photos` | `immich_asset_id`, `album_id` (nullable FK → `albums`; `NULL` = the general "Shared Album"), `title`, `caption`, `media_type` (`image`/`video`), `uploaded_by` → `users`. |
 
-Any member in `active`/`chair`/`alumni`/`eboard`/`pledge` (the full list lives in `constants.js` as `SHARED_ALBUM_GROUPS`, reused across every member-facing feature below) can upload/view. The uploader can always delete their own photo; an eboard member can additionally delete any photo inside an album *they personally created* (moderation, not blanket access to every album).
+Any member in `active`/`chair`/`alumni`/`eboard`/`pledge` (the full list lives in `constants.js` as `SHARED_ALBUM_GROUPS`, reused across every member-facing feature below) can upload/view. The uploader can always delete their own photo; **eboard can delete any photo in any album**, including the general Shared Album — a real moderation power (this was previously scoped to only albums an eboard member personally created; broadened so a reported photo can actually be removed by whoever reviews it).
 
 ### `homepage_photos` table
 
@@ -112,9 +130,9 @@ An eboard-managed file library (bylaws, meeting minutes, course files, etc.) sho
 | Table | Purpose |
 |-------|---------|
 | `document_folders` | `name`, `parent_id` (self-referencing FK — folders nest to any depth; `NULL` = top level), `created_by` |
-| `documents` | `folder_id` (nullable — `NULL` = top level), `filename` (original name shown to users), `storage_path` (actual disk path, never exposed to clients), `mime_type`, `file_size`, `uploaded_by` |
+| `documents` | `folder_id` (nullable — `NULL` = top level), `filename` (original name shown to users), `kind` (`file` \| `link`), `storage_path`/`mime_type`/`file_size` (only for `kind = "file"`, never exposed to clients as a raw path), `url` (only for `kind = "link"`), `uploaded_by` |
 
-View: any shared-album-group member. Writes (folders and files alike): eboard only. Deleting a folder cascades its DB rows *and* walks a recursive query to delete every nested file from disk too — disk space on the API's LXC is limited, so orphaned files aren't left behind.
+A "document" can now be an external hyperlink (Google Docs/Slides/Sheets, or any URL) instead of an uploaded file — same folder tree, same eboard-write permissions, just no file on disk. `storage_path` is nullable to allow for this. View: any shared-album-group member. Writes (folders, files, and links alike): eboard only. Deleting a folder cascades its DB rows *and* walks a recursive query to delete every nested file from disk too (link rows have nothing on disk to clean up) — disk space on the API's LXC is limited, so orphaned files aren't left behind.
 
 ### `committees` / `committee_members` tables
 
@@ -139,6 +157,8 @@ Four distinct systems, not one generic "messages" table:
 | `group_chat_messages` | Messages within a `group_chats` thread. |
 | `group_chat_reads` | Per-user "last read" marker per group chat — a single message can be read by many different members at different times, so (unlike `direct_messages`) read state can't live on the message row itself. |
 
+**Safety layer on both `direct_messages` and `group_chat_messages` sends:** a basic content filter (`services/contentFilter.js`, wraps the npm package `bad-words` — **pinned to `^3.0.4`**, v4 ships broken CJS/ESM packaging that fails `require()` in this project, confirmed while wiring this up) rejects flagged message bodies with `400`. An in-memory fixed-window rate limiter (`middleware/rateLimit.js`, no Redis — single process is fine at this chapter's scale) caps sends at 20/minute/user, returning `429` over the limit. See `user_blocks` above for how blocking additionally filters what a caller sees.
+
 ### `events` table
 
 Gained several columns beyond the original bare title/date/location shape:
@@ -152,6 +172,18 @@ Gained several columns beyond the original bare title/date/location shape:
 | `created_by` | → `users`. Needed because non-eboard users (committee chairs) can create events too, to check *which* committee they're allowed to scope one to |
 
 **Permission logic** (`eventsController.checkEventPermission`): eboard can set any `audience`/`committee_id` combination; a committee chair can only scope to a committee they chair, and can't set `audience`; anyone else is forbidden. `title`/`start_date`/`end_date` are validated server-side before touching the DB.
+
+### `polls` / `poll_options` / `poll_votes` tables
+
+Same targeting shape as `events`/`announcements` (`audience TEXT[]` + `committee_id`, mutually exclusive).
+
+| Table | Purpose |
+|-------|---------|
+| `polls` | `question`, `description`, `audience`, `committee_id`, `multi_select` (single- vs multi-choice), `is_closed` (manual toggle), `expires_at` (optional scheduled close), `created_by` |
+| `poll_options` | `poll_id`, `label`, `display_order` |
+| `poll_votes` | Composite PK (`poll_id`, `option_id`, `user_id`) — one row per selected option. Voting again `DELETE`s the caller's prior rows for that poll first, then inserts the new selection — handles "change my vote" and single-vs-multi-select enforcement (the controller limits how many ids get passed) with the same code path. |
+
+**`expires_at` is resolved at read time, not by a cron job**: `pollModel.toPollJSON` computes the "effective" `is_closed` as `is_closed OR (expires_at IS NOT NULL AND expires_at <= NOW())` on every request. No background worker needed, and it can't drift out of sync with the real clock — the tradeoff is every read re-checks the current time rather than trusting a stored flag.
 
 ---
 
