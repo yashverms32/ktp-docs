@@ -119,5 +119,5 @@ Group names are **case-sensitive** and must match exactly what's used in the inv
 
 **User in wrong portal:**
 - Check their groups in Authentik: **Directory → Users → select user → Groups tab**
-- Group priority: `eboard > chair > active > pledge > alumni`
+- Group priority: `eboard > chair > active > alumni > pledge`
 - The DB `member_group` updates on every login via `/users/sync`

@@ -158,7 +158,7 @@ Reads (`GET /events`, `GET /events/:id`) use `optionalAuth` — a valid token pe
 
 ### `GET /events`
 
-Returns events visible to the caller: public ones (no `audience`/`committee_id` set) always; plus, if authenticated, ones where `audience` overlaps the caller's Authentik groups, or the caller is a member of the event's `committee_id`. Eboard gets every event unfiltered.
+Returns events visible to the caller: public ones (no `audience`/`committee_id` set) always; plus, if authenticated, ones where `audience` overlaps the caller's Authentik groups, or the caller is a member of the event's `committee_id`. Eboard gets every event unfiltered. Chair and eboard members count as `active` for this overlap even though Authentik keeps the three groups mutually exclusive — targeting `audience: ["active"]` still reaches them (Announcements and Polls, targeted the same way as Events, inherit this too).
 
 ### `POST /events`
 
